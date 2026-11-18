@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cmx-material-manager"
-version = "0.1.0"
+version = "0.2.0"
 description = "Independent desktop editor for CMX material libraries"
 requires-python = ">=3.12,<3.13"
 license = "MIT"

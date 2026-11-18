@@ -8,7 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from lxml import etree
-from PySide6.QtCore import QSettings, Qt, Signal
+from PySide6.QtCore import QItemSelectionModel, QSettings, QSignalBlocker, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QFontDatabase, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QComboBox, QDialog, QDialogButtonBox,
@@ -364,22 +364,40 @@ class Entry:
         return self.included or self.original_name is None or material_xml(self.element) != self.original_xml
 
 
+class MaterialListItem(QListWidgetItem):
+    def refresh(self, entry):
+        name = entry.element.get("name", "")
+        types = " / ".join(child.tag for child in entry.element if isinstance(child.tag, str))
+        self.setToolTip(name + "\n" + types)
+        self.setText(("● " if entry.pending else "") + self.toolTip())
+
+    def __lt__(self, other):
+        return self.toolTip().casefold() < other.toolTip().casefold()
+
+
 class PreviewDialog(QDialog):
     def __init__(self, plans, parent):
         super().__init__(parent)
         self.setWindowTitle("일괄 저장 미리보기")
         self.resize(940, 650)
         layout = QVBoxLayout(self)
-        layout.addWidget(label("선택한 물질 전체를 대상의 같은 이름 물질에 반영합니다. 다른 물질은 유지합니다."))
+        layout.addWidget(label("대상에 없는 물질은 추가하고, 같은 이름의 물질은 기준 물질의 내용으로 교체합니다."))
         layout.addWidget(label("파일별 백업 후 순차 저장 · 오류 시 이미 저장한 파일 복구 시도", True))
         split = QSplitter(Qt.Vertical)
         self.paths = QListWidget()
         for plan in plans:
-            self.paths.addItem(f"{plan.status}  |  {plan.path}\n" + " · ".join(plan.actions))
+            self.paths.addItem(f"{plan.status}  |  {plan.path}")
         self.diff = QPlainTextEdit()
         self.diff.setReadOnly(True)
         self.diff.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
-        self.paths.currentRowChanged.connect(lambda row: self.diff.setPlainText(plans[row].diff or "변경 없음") if row >= 0 else None)
+
+        def show_file(row):
+            if row >= 0:
+                plan = plans[row]
+                actions = "\n".join(plan.actions)
+                self.diff.setPlainText((plan.diff or "변경 없음") + "\n\n" + actions)
+
+        self.paths.currentRowChanged.connect(show_file)
         split.addWidget(self.paths)
         split.addWidget(self.diff)
         split.setSizes([180, 400])
@@ -392,7 +410,7 @@ class PreviewDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
-        self.paths.setCurrentRow(0)
+        self.paths.setCurrentRow(next((i for i, plan in enumerate(plans) if plan.changed), 0))
 
 
 class MainWindow(QMainWindow):
@@ -404,7 +422,8 @@ class MainWindow(QMainWindow):
         self.source_path = None
         self.entries = {}
         self.current_key = None
-        self.selecting = False
+        self.material_items = {}
+        self.visible_count = 0
         self.setWindowTitle(f"CMX Material Manager  {__version__}")
         self.resize(1260, 860)
         self.setMinimumSize(920, 660)
@@ -441,7 +460,9 @@ class MainWindow(QMainWindow):
         self.count = label("0개 물질", True)
         lib.addWidget(self.count)
         self.materials = QListWidget()
+        self.materials.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.materials.currentItemChanged.connect(self.selection_changed)
+        self.materials.itemSelectionChanged.connect(self.update_selection_status)
         lib.addWidget(self.materials, 1)
         actions = QHBoxLayout()
         self.new_button = button("새 물질", self.new_material)
@@ -450,6 +471,7 @@ class MainWindow(QMainWindow):
         actions.addWidget(self.copy_button)
         lib.addLayout(actions)
         self.include_button = button("선택 물질 동기화에 포함", self.include_material)
+        self.include_button.setToolTip("목록에서 Ctrl+클릭으로 개별 선택, Shift+클릭으로 범위 선택, Ctrl+A로 검색 결과 전체 선택")
         lib.addWidget(self.include_button)
         library.setMinimumWidth(225)
         edit_box = QGroupBox("02  물질 속성")
@@ -487,6 +509,9 @@ class MainWindow(QMainWindow):
         footer = QHBoxLayout()
         self.pending_label = label("저장 대기 0개 물질", True)
         footer.addWidget(self.pending_label, 1)
+        self.sync_all_button = button("전체 자동 동기화", lambda: self.sync_files(all_materials=True))
+        self.sync_all_button.setToolTip("검색과 선택에 관계없이 기준 파일의 모든 물질을 체크한 대상과 비교합니다.")
+        footer.addWidget(self.sync_all_button)
         self.save_button = button("변경 미리보기 / 일괄 저장", self.sync_files, True)
         footer.addWidget(self.save_button)
         targets_layout.addLayout(footer)
@@ -555,28 +580,39 @@ class MainWindow(QMainWindow):
         return True
 
     def refresh_materials(self, key=None):
-        self.selecting = True
-        self.materials.clear()
-        for entry_key, entry in sorted(self.entries.items(), key=lambda pair: pair[1].element.get("name", "").casefold()):
-            types = " / ".join(child.tag for child in entry.element if isinstance(child.tag, str))
-            item = QListWidgetItem(("● " if entry.pending else "") + entry.element.get("name", "") + "\n" + types)
-            item.setData(Qt.UserRole, entry_key)
-            item.setToolTip(entry.element.get("name", "") + "\n" + types)
-            self.materials.addItem(item)
-            if entry_key == key:
-                self.materials.setCurrentItem(item)
-        self.selecting = False
+        with QSignalBlocker(self.materials):
+            self.material_items.clear()
+            self.materials.clear()
+            for entry_key, entry in self.entries.items():
+                item = MaterialListItem()
+                item.setData(Qt.UserRole, entry_key)
+                item.refresh(entry)
+                self.materials.addItem(item)
+                self.material_items[entry_key] = item
+            self.materials.sortItems()
+            if key is not None:
+                self.materials.setCurrentItem(self.material_items[key])
         self.filter_materials()
 
     def filter_materials(self):
         query = self.search.text().strip().casefold()
-        visible = 0
-        for i in range(self.materials.count()):
-            item = self.materials.item(i)
-            hidden = query not in item.text().casefold()
-            item.setHidden(hidden)
-            visible += not hidden
-        self.count.setText(f"{visible} / {len(self.entries)}개 물질")
+        self.visible_count = 0
+        with QSignalBlocker(self.materials):
+            for item in self.material_items.values():
+                hidden = query not in item.text().casefold()
+                item.setHidden(hidden)
+                if hidden:
+                    item.setSelected(False)
+                self.visible_count += not hidden
+        self.update_selection_status()
+
+    def update_selection_status(self):
+        selected = len(self.materials.selectedItems())
+        self.count.setText(f"{self.visible_count} / {len(self.entries)}개 물질 · 선택 {selected}개")
+        self.include_button.setEnabled(bool(selected))
+        current = self.materials.currentItem()
+        if current is None or current.data(Qt.UserRole) == self.current_key:
+            self.accepted_selection = self.materials.selectionModel().selection()
 
     def resolve_editor(self):
         if not self.editor.dirty:
@@ -593,36 +629,45 @@ class MainWindow(QMainWindow):
         return box.clickedButton() is discard
 
     def selection_changed(self, current, previous):
-        if self.selecting or current is None:
+        if current is None:
             return
         key = current.data(Qt.UserRole)
         if key == self.current_key:
             return
         if not self.resolve_editor():
-            self.selecting = True
-            for i in range(self.materials.count()):
-                item = self.materials.item(i)
-                if item.data(Qt.UserRole) == self.current_key:
-                    self.materials.setCurrentItem(item)
-            self.selecting = False
+            selection = self.accepted_selection
+            self.materials.setCurrentItem(previous, QItemSelectionModel.NoUpdate)
+
+            def restore_selection():
+                if self.materials.currentItem() is previous:
+                    self.materials.selectionModel().select(selection, QItemSelectionModel.ClearAndSelect)
+
+            restore_selection()
+            # Qt finishes mouse selection after currentItemChanged returns.
+            QTimer.singleShot(0, self, restore_selection)
             return
         self.current_key = key
         self.editor.load(self.entries[key].element, self.source.root.find("DataDescriptions"))
-        self.refresh_materials(key)
         self.update_status()
 
     def stage_current(self):
         if self.current_key is None:
             return False
-        self.stage_button.setFocus()
+        if self.editor.isAncestorOf(QApplication.focusWidget()):
+            self.stage_button.setFocus()
         try:
             element = self.editor.capture()
             name = element.get("name")
             if any(key != self.current_key and entry.element.get("name") == name for key, entry in self.entries.items()):
                 raise ValueError(f"이미 존재하는 물질 이름: {name}")
-            self.entries[self.current_key].element = element
+            entry = self.entries[self.current_key]
+            renamed = name != entry.element.get("name")
+            entry.element = element
             self.editor.load(element, self.source.root.find("DataDescriptions"))
-            self.refresh_materials(self.current_key)
+            self.material_items[self.current_key].refresh(entry)
+            if renamed:
+                self.materials.sortItems()
+            self.filter_materials()
             self.update_status()
             return True
         except (ValueError, etree.Error) as error:
@@ -650,7 +695,9 @@ class MainWindow(QMainWindow):
             entry.element = copy.deepcopy(self.source.get(entry.original_name))
             entry.included = False
             self.editor.load(entry.element, self.source.root.find("DataDescriptions"))
-            self.refresh_materials(self.current_key)
+            self.material_items[self.current_key].refresh(entry)
+            self.materials.sortItems()
+            self.filter_materials()
         self.update_status()
 
     def new_material(self):
@@ -688,10 +735,16 @@ class MainWindow(QMainWindow):
         self.update_status()
 
     def include_material(self):
-        if self.current_key is not None and self.stage_current():
-            self.entries[self.current_key].included = True
-            self.refresh_materials(self.current_key)
-            self.update_status()
+        self.include_button.setFocus()
+        selected = self.materials.selectedItems()
+        if self.materials.currentItem() in selected and self.editor.dirty and not self.stage_current():
+            return
+        for item in selected:
+            if not item.isHidden():
+                entry = self.entries[item.data(Qt.UserRole)]
+                entry.included = True
+                item.refresh(entry)
+        self.update_status()
 
     def add_paths(self, paths, checked=True):
         existing = {os.path.normcase(self.targets.item(i).data(Qt.UserRole)) for i in range(self.targets.count())}
@@ -745,13 +798,14 @@ class MainWindow(QMainWindow):
             if item.data(Qt.UserRole) != str(self.source_path):
                 self.targets.takeItem(self.targets.row(item))
 
-    def sync_files(self):
+    def sync_files(self, *, all_materials=False):
         self.save_button.setFocus()
         if self.source is None:
             return
         if self.editor.dirty and not self.stage_current():
             return
-        changes = [Change(entry.original_name, material_xml(entry.element)) for entry in self.entries.values() if entry.pending]
+        changes = [Change(entry.original_name, material_xml(entry.element)) for entry in self.entries.values()
+                   if all_materials or entry.pending]
         if not changes:
             QMessageBox.information(self, "변경 없음", "물질을 편집하거나 '선택 물질 동기화에 포함'을 누르세요.")
             return
@@ -759,6 +813,8 @@ class MainWindow(QMainWindow):
         try:
             plans = prepare_sync(paths, changes, source=self.source)
             preview = PreviewDialog(plans, self)
+            if all_materials:
+                preview.setWindowTitle(f"전체 자동 동기화 · 기준 물질 {len(changes)}개")
             if preview.exec() != QDialog.Accepted:
                 return
             QApplication.setOverrideCursor(Qt.WaitCursor)
@@ -803,18 +859,20 @@ class MainWindow(QMainWindow):
 
     def update_status(self):
         loaded = self.source is not None
+        self.sync_all_button.setEnabled(bool(self.entries))
         selected = self.current_key is not None
         for widget in (self.new_button, self.save_button, self.export_button):
             widget.setEnabled(loaded)
-        for widget in (self.copy_button, self.include_button, self.stage_button, self.revert_button):
+        for widget in (self.copy_button, self.stage_button, self.revert_button):
             widget.setEnabled(selected)
+        self.update_selection_status()
         count = sum(entry.pending for entry in self.entries.values())
         self.pending_label.setText(f"저장 대기 {count}개 물질 · 원본 폴더에 자동 백업")
         self.edit_status.setText("반영하지 않은 편집 있음" if self.editor.dirty else "편집 반영 후 일괄 저장" if selected else "물질을 선택하세요.")
         self.statusBar().showMessage("Ctrl+O 열기  ·  Ctrl+F 검색  ·  Ctrl+S 미리보기 / 저장")
 
     def show_help(self):
-        QMessageBox.information(self, "사용 안내", "1. 기준 CMX 파일 열기\n2. 물질 선택 → 표 또는 XML 편집 → 편집 반영\n3. 대상 파일 추가 또는 줄 단위 경로 목록 입력\n4. 변경 미리보기 확인 → 백업 후 저장\n\n별도 파일: 'CMX 내보내기'로 현재 라이브러리 전체를 저장합니다.\n내보내기는 기준 파일과 일괄 저장 대상을 변경하지 않습니다.\n편집하지 않은 물질도 '선택 물질 동기화에 포함'으로 배포할 수 있습니다.\n같은 이름의 대상 물질 전체가 교체됩니다.\n기준 파일은 항상 일괄 저장 대상에 포함됩니다.\n재시작하면 기억한 경로는 체크 해제됩니다.\n\nCadence에서 파일을 사용 중이라면 닫고 저장하세요.\nProgram Files 등 보호된 대상은 쓰기 권한이 필요합니다.\n새 물질의 초기값은 예제이며 실제 사양으로 바꿔야 합니다.\n\n독립 도구 · Cadence 공식 제품이 아닙니다.")
+        QMessageBox.information(self, "사용 안내", "1. 기준 CMX 파일 열기\n2. 물질 선택 → 표 또는 XML 편집 → 편집 반영\n3. 대상 파일 추가 또는 줄 단위 경로 목록 입력\n4. 변경 미리보기 확인 → 백업 후 저장\n\n별도 파일: 'CMX 내보내기'로 현재 라이브러리 전체를 저장합니다.\n내보내기는 기준 파일과 일괄 저장 대상을 변경하지 않습니다.\nCtrl·Shift로 여러 물질을 선택해 저장 대기에 포함할 수 있습니다.\n'전체 자동 동기화'는 검색 범위와 관계없이 모든 물질을 비교합니다.\n같은 이름의 대상 물질 전체가 교체됩니다.\n기준 파일은 항상 일괄 저장 대상에 포함됩니다.\n재시작하면 기억한 경로는 체크 해제됩니다.\n\nCadence에서 파일을 사용 중이라면 닫고 저장하세요.\nProgram Files 등 보호된 대상은 쓰기 권한이 필요합니다.\n새 물질의 초기값은 예제이며 실제 사양으로 바꿔야 합니다.\n\n독립 도구 · Cadence 공식 제품이 아닙니다.")
 
     def closeEvent(self, event):
         if not self.discard_pending():

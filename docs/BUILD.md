@@ -27,7 +27,7 @@ PyInstaller 실행 폴더 생성 후 Qt 비표시 화면에서 앱 기동·종�
 | 결과 | 경로 |
 | --- | --- |
 | 실행 파일 | `dist/CMX Material Manager/CMX Material Manager.exe` |
-| Windows 설치 파일 | `dist/CMX-Material-Manager-0.1.0-windows-x64-setup.exe` |
+| Windows 설치 파일 | `dist/CMX-Material-Manager-0.2.0-windows-x64-setup.exe` |
 | 배포 라이선스 | 실행 폴더의 `_internal/licenses/` |
 | 사용 가이드·예제 | 실행 폴더의 `docs/USER_GUIDE.md`, `examples/demo.cmx` |
 

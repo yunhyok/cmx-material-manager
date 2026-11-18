@@ -46,6 +46,12 @@ def select(window, name):
     raise AssertionError(name)
 
 
+def click_material(window, row, modifier=Qt.NoModifier):
+    materials = window.materials
+    point = materials.visualItemRect(materials.item(row)).center()
+    QTest.mouseClick(materials.viewport(), Qt.LeftButton, modifier, point)
+
+
 def test_read_only_capture_preserves_all_demo_data(window):
     for name, entry in list(window.entries.items()):
         select(window, name)
@@ -60,10 +66,11 @@ def test_staging_during_selection_keeps_list_and_editor_in_sync(window, monkeypa
     window.editor.fields["DefaultThickness"].setText("40um")
     window.editor.mark_dirty()
     monkeypatch.setattr(window, "resolve_editor", lambda: window.stage_current())
-    select(window, "DEMO_Dielectric")
+    click_material(window, 1, Qt.ControlModifier)
     assert window.current_key == window.materials.currentItem().data(Qt.UserRole)
     assert window.editor.fields["name"].text() == "DEMO_Dielectric"
     assert window.entries["DEMO_Conductor"].pending
+    assert {item.data(Qt.UserRole) for item in window.materials.selectedItems()} == {"DEMO_Conductor", "DEMO_Dielectric"}
 
 
 def test_ctrl_s_commits_active_table_cell(window, app, monkeypatch):
@@ -113,6 +120,94 @@ def test_batch_ui_updates_two_files_and_leaves_backup(window, tmp_path, monkeypa
         backups = list(tmp_path.glob(path.name + ".*.bak"))
         assert len(backups) == 1 and backups[0].read_bytes() == initial
     assert not any(e.pending for e in window.entries.values())
+
+
+@pytest.mark.parametrize(("gesture", "expected"), [
+    ("ctrl", {"DEMO_Conductor", "DEMO_Thermal"}),
+    ("shift", {"DEMO_Conductor", "DEMO_Dielectric"}),
+    ("filtered-all", {"DEMO_Dielectric", "DEMO_Thermal"}),
+])
+def test_include_and_save_selected_materials(window, tmp_path, monkeypatch, gesture, expected):
+    materials = window.materials
+    click_material(window, 0)
+    if gesture == "filtered-all":
+        QTest.keyClicks(window.search, "Thermal")
+        click_material(window, 1)
+        QTest.keyClick(materials, Qt.Key_A, Qt.ControlModifier)
+    elif gesture == "ctrl":
+        click_material(window, 2, Qt.ControlModifier)
+    else:
+        click_material(window, 1, Qt.ShiftModifier)
+
+    assert {item.data(Qt.UserRole) for item in materials.selectedItems()} == expected
+    current = window.current_key
+    assert current in expected
+    window.editor.tabs.setCurrentIndex(0)
+    thickness = window.editor.fields["DefaultThickness"]
+    thickness.selectAll()
+    QTest.keyClicks(thickness, "45um")
+    QTest.mouseClick(window.include_button, Qt.LeftButton)
+    assert {name for name, entry in window.entries.items() if entry.pending} == expected
+    assert window.entries[current].element.get("DefaultThickness") == "45um"
+
+    target = tmp_path / "target.cmx"
+    target.write_bytes(window.source_path.read_bytes().replace(b"DEMO_", b"TARGET_"))
+    window.add_paths([str(target)])
+    monkeypatch.setattr(PreviewDialog, "exec", lambda self: QDialog.Accepted)
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
+    QTest.mouseClick(window.save_button, Qt.LeftButton)
+    saved = CmxDocument.load(target)
+    assert {m.get("name") for m in saved.materials if m.get("name").startswith("DEMO_")} == expected
+    assert saved.get(current).get("DefaultThickness") == "45um"
+
+
+def test_sync_all_previews_filtered_materials_and_only_writes_changed_files(window, tmp_path, monkeypatch):
+    original = window.source_path.read_bytes()
+    target = tmp_path / "target.cmx"
+    different = original.replace(b"DEMO_Thermal", b"TARGET_ONLY").replace(b"100um", b"90um")
+    target.write_bytes(different)
+    extra = material_xml(CmxDocument.load(target).get("TARGET_ONLY"))
+    identical = tmp_path / "identical.cmx"
+    up_to_date = original.replace(b"35um", b"40um")
+    identical.write_bytes(up_to_date)
+    unchecked = tmp_path / "unchecked.cmx"
+    unchecked.write_bytes(different)
+    window.add_paths([str(target), str(identical)])
+    window.add_paths([str(unchecked)], checked=False)
+
+    QTest.keyClicks(window.search, "Conductor")
+    window.editor.tabs.setCurrentIndex(0)
+    thickness = window.editor.fields["DefaultThickness"]
+    thickness.selectAll()
+    QTest.keyClicks(thickness, "40um")
+    previews = []
+
+    def cancel_preview(dialog):
+        for row in range(dialog.paths.count()):
+            if dialog.paths.item(row).text().endswith(str(target)):
+                dialog.paths.setCurrentRow(row)
+                previews.append(dialog.diff.toPlainText())
+        return QDialog.Rejected
+
+    monkeypatch.setattr(PreviewDialog, "exec", cancel_preview)
+    QTest.mouseClick(window.sync_all_button, Qt.LeftButton)
+    assert len(previews) == 1
+    assert all(name in previews[0] for name in ("DEMO_Conductor", "DEMO_Dielectric", "DEMO_Thermal", "40um"))
+    assert {name for name, entry in window.entries.items() if entry.pending} == {"DEMO_Conductor"}
+    assert window.source_path.read_bytes() == original and target.read_bytes() == different
+    assert not list(tmp_path.glob("*.bak"))
+
+    monkeypatch.setattr(PreviewDialog, "exec", lambda self: QDialog.Accepted)
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
+    QTest.mouseClick(window.sync_all_button, Qt.LeftButton)
+    saved = CmxDocument.load(target)
+    assert material_xml(saved.get("TARGET_ONLY")) == extra
+    source = CmxDocument.load(window.source_path)
+    assert source.get("DEMO_Conductor").get("DefaultThickness") == "40um"
+    for material in source.materials:
+        assert material_xml(saved.get(material.get("name"))) == material_xml(material)
+    assert identical.read_bytes() == up_to_date and unchecked.read_bytes() == different
+    assert sorted(p.read_bytes() for p in tmp_path.glob("*.bak")) == sorted([original, different])
 
 
 def test_export_ui_keeps_source_and_pending_changes(window, tmp_path, monkeypatch):
