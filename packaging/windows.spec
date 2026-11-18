@@ -48,7 +48,7 @@ a = Analysis(
     hookspath=[str(root / "packaging/hooks")],
     hiddenimports=["PySide6.support.deprecated"],
     module_collection_mode={"PySide6": "py", "shiboken6": "py"},
-    excludes=["PyQt5", "PyQt6", "PySide2", "tkinter"],
+    excludes=["PyQt5", "PyQt6", "PySide2", "PySide6.QtNetwork", "tkinter"],
 )
 # Qt Widgets uses raster painting here. No OpenGL software fallback is used.
 a.binaries = [entry for entry in a.binaries if Path(entry[0]).name.lower() != "opengl32sw.dll"]
