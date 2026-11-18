@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Cadence_Material_Lib Version="1.05">
+  <!-- Synthetic example only. Replace all values with verified material data. -->
+  <DataDescriptions>
+    <Material><Column name="Default Thickness" unit="um" /></Material>
+    <Metal><Column name="Temperature" unit="C" /><Column name="Conductivity" unit="S/m" /></Metal>
+    <Dielectric><Column name="Temperature" unit="C" /><Column name="Frequency" unit="MHz" /><Column name="Relative Permittivity" /><Column name="LossTangent" /></Dielectric>
+    <Thermal><Column name="Temperature" unit="C" /><Column name="Conductivity" unit="W/(m*K)" /><Column name="Density" unit="kg/m^3" /><Column name="Specific heat" unit="J/(kg*K)" /><Column name="Emissivity" /><Column name="Solar Reflectance" /></Thermal>
+  </DataDescriptions>
+  <Material name="DEMO_Dielectric" DefaultThickness="100um" UpperTolerance="10um" LowerTolerance="10um">
+    <Dielectric>
+      <Model Temperature="25">
+1000 4.2 0.020
+5000 4.1 0.022
+10000 4.0 0.024
+      </Model>
+      <Model Temperature="85">
+1000 4.3 0.023
+5000 4.2 0.025
+10000 4.1 0.027
+      </Model>
+    </Dielectric>
+    <Thermal><Model>
+25 0.3 1800 1000 0.8 0
+    </Model></Thermal>
+  </Material>
+  <Material name="DEMO_Conductor" DefaultThickness="35um">
+    <Metal><Model>
+20 58000000
+100 44000000
+    </Model></Metal>
+  </Material>
+  <Material name="DEMO_Thermal">
+    <Thermal><Model>
+25 1.5 2000 900 0.8 0
+100 1.4 2000 950 0.8 0
+    </Model></Thermal>
+  </Material>
+</Cadence_Material_Lib>

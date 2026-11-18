@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools==82.0.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cmx-material-manager"
+version = "0.1.0"
+description = "Independent desktop editor for CMX material libraries"
+requires-python = ">=3.12,<3.13"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = ["PySide6-Essentials==6.11.0", "lxml==6.1.1"]
+
+[project.gui-scripts]
+cmx-material-manager = "material_manager.__main__:main"
+
+[tool.setuptools.package-data]
+material_manager = ["assets/*.ico", "assets/*.png"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
